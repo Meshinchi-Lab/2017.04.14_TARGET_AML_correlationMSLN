@@ -1,0 +1,383 @@
+---
+title: "Correlation Analysis"
+author: "Jenny Smith"
+date: "April 14, 2017"
+output: html_document
+---
+
+Purpose: To identify the genes that are covariates with MSLN expresssion. 
+
+The Analysis Plan
+1. subset the TPM expression data for the gene sets of interest (defined by Allison Kaeding)
+2. Create correlation plots of these genes of interest (look how to highlight MSLN)
+3. Perform linear modeling with Limma package to identify gene which positively and negatively correlated with MSLN and are significant. 
+4. WGCNA analysis
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = 'H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(plyr)
+library(ggplot2)
+library(limma)
+library(edgeR)
+library(dendextend)
+library(pvclust)
+library(corrplot)
+library(gtools)
+getwd()
+```
+
+```{r}
+source("H:/scripts/ConversionScripts/Ensembl_ID_Convert_Function.r")
+# source("H:/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+```
+
+
+
+#Read in the data
+
+#high Depth diagnostic samples
+```{r}
+HD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/Dx_rawcounts_FilteredLowCounts_withGeneSymbol_TARGET_AML_Aug2014.RData"))
+
+dim(HD_counts)
+```
+
+
+#low Depth
+
+```{r}
+LD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/combatAdjustedExp.RData"))
+LD_counts[which(LD_counts < 0, arr.ind=TRUE)] <- 0
+LD_counts <- LD_counts[, which(! grepl("^BM", colnames(LD_counts)))]
+
+
+dim(LD_counts)
+```
+
+
+
+
+#Read in the genes (covariates) of  interest
+
+#Top 400 highly expressed genes
+```{r}
+#genes selectedas expressed only in AML by Rhonda 
+# highGenesdf <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/Correlation_analysis_w_MSLN.csv", stringsAsFactors = FALSE)
+
+highGenesdf <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/Genes_expressed_only_in_AML.csv", stringsAsFactors = FALSE)
+
+
+dim(highGenesdf)
+```
+
+```{r}
+head(highGenesdf)
+```
+
+
+```{r}
+highGenes <- highGenesdf$X
+```
+
+#CBF MLL associated genes
+```{r}
+CBF_MLL_Genesdf <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/Gene_expression_associated_w_being_CBF_and_MLL.csv", stringsAsFactors = FALSE)
+
+dim(CBF_MLL_Genesdf)
+```
+
+```{r}
+head(CBF_MLL_Genesdf)
+```
+
+```{r}
+t.8.21 <- CBF_MLL_Genesdf$t.8.21.[-1]
+
+inv.16 <- CBF_MLL_Genesdf$inv.16.[-1]
+
+All.CBF <- CBF_MLL_Genesdf$All.CBF[-1]
+
+KMT2A <- CBF_MLL_Genesdf$KMT2A[-1]
+```
+
+```{r}
+genesToExamine <- list(highGenes, t.8.21, inv.16 , All.CBF, KMT2A)
+names(genesToExamine) <- c("highGenes", "t.8.21", "inv.16" , "All.CBF", "KMT2A")
+```
+
+```{r}
+names(genesToExamine)
+```
+
+```{r}
+sapply(genesToExamine, length)
+```
+
+
+#Define Functions to be used
+
+```{r}
+voom_Cor <- function(df, geneOfInterest, logCPM=NULL, voom=NULL){
+  #df with count data, patient IDs are column names
+  #ref: https://support.bioconductor.org/p/53554/
+
+  require(edgeR)
+  require(limma)
+
+  dge <- DGEList(counts = df)
+  keep.dge <- rowSums(cpm(dge) >= 1) >= (0.05*ncol(df)) #5% of dataset has cpm of at least 1 for a gene
+  dge <- dge[keep.dge,] #subset for those genes with cmp >= 1 per gene
+  
+  if (is.null(logCPM)){
+    dge <- calcNormFactors(dge) #calculate the normalization factors
+    
+  }else if (logCPM==TRUE){
+    dge <- calcNormFactors(dge) #calculate the normalization factors
+    log2Expn <- cpm(dge, log=TRUE, prior.count = 1)
+    
+  }else if (logCPM==FALSE){
+    log2Expn <- apply(dge$counts, 2, function(x) log2(x + 1))
+  }
+ 
+
+  if (is.null(voom) && is.null(logCPM)){
+    i <- which(rownames(dge$counts) == geneOfInterest)
+    geneX <- dge$counts[i, ]
+    Expnmat <- dge$counts[-i, ]
+    
+  } else if (exists("log2Expn") && is.null(voom)) {
+    i <- which(rownames(log2Expn) == geneOfInterest)
+    geneX <- log2Expn[i, ]
+    Expnmat <- log2Expn[-i, ]
+    
+  } else if (voom==TRUE && is.null(logCPM)){
+    v.lv <- voom(dge)
+    i <- which(rownames(v.lv$E) == geneOfInterest)
+    geneX <- v.lv$E[i, ]
+    Expnmat <- v.lv[-i, ]
+  }
+
+  design <- cbind(1, geneX) #compare all genes to geneX expression (gene of interest)
+  
+  fit1 <- lmFit(Expnmat, design) #fit the linear model
+  fit2 <- eBayes(fit1)
+  
+  table <- toptable(fit2, coef = 2, number = 5000, p.value = 0.05, adjust.method = "BH") #select top 5000 genes
+
+  list <- list(dge, design, geneX, Expnmat, fit1, fit2, table)
+  names(list) <- c("dge", "design", "GeneOfInterest_Expn","ExpnMatrix", "lmfit", "ebayesfit", "CorrGenes")
+
+  return(list)
+}
+```
+
+
+
+#Apply the linear modeling in the Voom method to MSLN
+```{r}
+HD_Vcor <- voom_Cor(HD_counts, "MSLN", voom = TRUE)
+
+summary(HD_Vcor)
+```
+
+```{r}
+dim(HD_Vcor$dge$counts)
+```
+
+```{r}
+head(HD_Vcor$design)
+```
+
+```{r}
+#selects the results from the contrast of geneX against all others (eg column 2 of design matrix results)
+HD_Vcor$CorrGenes
+```
+
+```{r}
+round(cor(HD_Vcor$GeneOfInterest_Expn, HD_Vcor$ExpnMatrix$E["TPPP3", ], method="pearson"), digits = 2) #not related to the linear regression 
+```
+
+```{r}
+dim(HD_Vcor$ExpnMatrix$E)
+```
+
+
+```{r}
+dim(HD_Vcor$ExpnMatrix$weights)
+```
+
+
+```{r}
+# model <- lm(HD_Vcor$GeneOfInterest_Expn ~ HD_Vcor$ExpnMatrix$E["TPPP3", ]) #1.02280, R2 0.5799
+model <- lm(HD_Vcor$ExpnMatrix$E["MED12L", ] ~ HD_Vcor$GeneOfInterest_Expn ) #0.56958, R2 0.5799
+
+sum <- summary(model)
+
+sum
+```
+
+```{r}
+plot( HD_Vcor$ExpnMatrix$E["TPPP3", ], HD_Vcor$GeneOfInterest_Expn)
+abline(model)
+```
+
+Regression coefficients represent the mean change in the response variable (MSLN) for one unit of change in the predictor variable (TPPP3) while holding other predictors in the model constant. 
+
+```{r}
+model$coefficients #this is the estimate for the TPPP3 expression from summary of the model fit
+```
+
+MSLN expression =  -0.9513849 + 1.0227994*TPPP3
+
+for every unit (voom transformed read counts) increase in TPPP3 expression, you expect and an increase of 1.0227 read counts for MSLN expression. 
+
+```{r}
+HD_Vcor$fit$coefficients["TPPP3", ] #this is the fold-change from the linear regression= 1.480768 nonlog
+```
+
+
+The lmFit method uses lm.series to model fit (in this case expression of MSLN against all other genes, one at atime, for each individual). The lmFit method has a utility function lm.series that fits the expression matrix using ordinary least squares, with qr method.  
+
+lm() base function fits the expression of MSLN to TPPP3 using ordinary least squares and qr method. 
+
+
+
+
+
+```{r}
+HD_Vcor$fit$p.value["TPPP3",] #p value is the pvalue for the linear model fitting between MSLN(geneX) and TPPP3. 
+```
+
+
+```{r}
+LD_Vcor <- voom_Cor(LD_counts, "MSLN", voom=TRUE)
+
+summary(LD_Vcor)
+```
+
+```{r}
+dim(LD_Vcor$dge$counts)
+```
+
+
+```{r}
+LD_Vcor$CorrGenes
+```
+
+```{r}
+# write.csv(LD_Vcor$CorrGenes, file="correlatedGenes_MSLN_LimmaVoom.csv", row.names = TRUE)
+```
+
+```{r}
+lm <- lm(LD_Vcor$GeneOfInterest_Expn ~ LD_Vcor$ExpnMatrix$E["TPPP3", ])
+
+summary(lm)
+```
+
+```{r}
+LD_Vcor$fit$coefficients["TPPP3", ] #foldchange is the coefficient
+```
+
+The coefficient for lmFit is 1.222 (0.2899085 in  log2 scale), while it is 1.266 in the ols method with lm(). 
+
+
+```{r}
+#Plot the voom  expression values 
+plot(LD_Vcor$ExpnMatrix$E["TPPP3", ], LD_Vcor$GeneOfInterest_Expn, xlab="TPPP3 Expression", ylab="MSLN Expression")
+
+abline(lm)
+```
+
+How do those outliers (far left clump), not affect the linear regression? 
+
+```{r}
+#residuals plots
+plot(lm)
+```
+
+
+```{r}
+cor(LD_Vcor$GeneOfInterest_Expn, LD_Vcor$ExpnMatrix$E["TPPP3", ], method = "kendall") #no relationship to correlation coefficients
+round(LD_Vcor$CorrGenes["TPPP3", ]$logFC, digits = 4)
+
+```
+
+
+#Correlation using the limma trend method 
+
+Use log2 TMMCPM normalized read counts and applied linear model in lmFit using ordinary least squares method to idenfify correlation bewteen each gene to MSLN. 
+
+```{r}
+HD_Log2Cor <- voom_Cor(HD_counts, "MSLN", logCPM = TRUE)
+
+summary(HD_Log2Cor)
+```
+
+
+```{r}
+dim(HD_Log2Cor$dge)
+```
+
+```{r}
+HD_Log2Cor$CorrGenes
+```
+
+
+
+```{r}
+#response = MSLN, predictor = TPPP3
+model <- lm(HD_Log2Cor$GeneOfInterest_Expn ~ HD_Log2Cor$ExpnMatrix["TPPP3",])
+
+plot(HD_Log2Cor$ExpnMatrix["TPPP3",], HD_Log2Cor$GeneOfInterest_Expn)
+abline(model)
+```
+
+```{r}
+summary(model) #adj. R2 is 0.5866 using log2CPM versus voom transfromation Adj. R-squared is 0.5799
+```
+
+```{r}
+HD_Log2Cor$fit$coefficients["TPPP3", ] #1.489741 when converted out of log2
+HD_Vcor$fit$coefficients["TPPP3", ] #1.480768
+```
+
+
+
+```{r}
+LD_Log2Cor <- voom_Cor(LD_counts, "MSLN", logCPM = FALSE)
+
+summary(LD_Log2Cor)
+```
+
+```{r}
+LD_Log2Cor$CorrGenes
+```
+
+```{r}
+LD_Log2Cor$fit$coefficients["TPPP3", ] # 1.24719
+LD_Vcor$fit$coefficients["TPPP3", ] #1.222563
+```
+
+```{r}
+lm <- lm(LD_Log2Cor$GeneOfInterest_Expn ~ LD_Log2Cor$ExpnMatrix["TPPP3", ])
+
+plot(LD_Log2Cor$ExpnMatrix["TPPP3", ], LD_Log2Cor$GeneOfInterest_Expn)
+abline(lm)
+```
+
+
+
+```{r}
+summary(lm)
+```
+
+

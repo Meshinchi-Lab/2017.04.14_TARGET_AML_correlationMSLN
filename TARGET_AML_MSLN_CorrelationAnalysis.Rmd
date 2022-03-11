@@ -1,0 +1,271 @@
+---
+title: "Correlation Analysis"
+author: "Jenny Smith"
+date: "April 14, 2017"
+output: html_document
+---
+
+Purpose: To identify the genes that are covariates with MSLN expresssion. 
+
+The Analysis Plan
+1. subset the TPM expression data for the gene sets of interest (defined by Allison Kaeding)
+2. Create correlation plots of these genes of interest (look how to highlight MSLN)
+3. Perform spearman rank correlation of genes to MSLN (?) using cor.test and then multiple hypothesis testing to correct for # of genes. 
+
+3. Perform linear modeling with Limma package to identify gene which positively and negatively correlated with MSLN and are significant. 
+4. 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = 'H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(plyr)
+library(ggplot2)
+library(limma)
+library(edgeR)
+library(dendextend)
+library(pvclust)
+library(corrplot)
+getwd()
+```
+
+```{r}
+source("H:/scripts/ConversionScripts/Ensembl_ID_Convert_Function.r")
+# source("H:/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+```
+
+
+
+#Define Functions 
+
+##Subset Function
+```{r}
+subset_ExpnData <- function(matrix, genes){
+  expnData <- t(matrix[which(rownames(matrix) %in% genes),]) #transpose and subset expression matrix
+  sd <- apply(expnData,2, FUN = sd) #calc sd for all genes
+  highSD <- sd[which(sd >= 1.0)] 
+  expnData <- expnData[,names(highSD)] #select genes with sd > 1 to avoid zero sd in cor analysis
+  return(expnData)
+}
+```
+
+
+
+#Read in the data
+
+#high Depth diagnostic samples
+```{r}
+HD_TPM <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/TPM_withGeneSymbol_TARGET_AML.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+Dx_HDTPM <- convert_Dx_Rx(HD_TPM, "ensemblSymbol", ID = "GENEID", subset = "Dx")
+
+dim(Dx_HDTPM)
+```
+
+```{r}
+Dx_HDTPM <- Dx_HDTPM[which(!duplicated(Dx_HDTPM$SYMBOL)), ]
+Dx_HDTPM <- Dx_HDTPM[which(!is.na(Dx_HDTPM$SYMBOL)), ]
+rownames(Dx_HDTPM) <- Dx_HDTPM$SYMBOL
+Dx_HDTPM <- Dx_HDTPM[,-(1:2)]
+```
+
+```{r}
+dim(Dx_HDTPM)
+```
+
+
+```{r}
+Dx_HDTPM <- as.matrix(Dx_HDTPM)
+head(Dx_HDTPM[,1:5])
+# save(Dx_HDTPM, file = "TARGET_AML_HD_DxOnly_genesAsRowNames.RData")
+```
+
+
+```{r}
+HD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/Dx_rawcounts_FilteredLowCounts_withGeneSymbol_TARGET_AML_Aug2014.RData"))
+```
+
+```{r}
+HD_dge <- DGEList(HD_counts)
+HD_dge <- 
+HD_cpm <- 
+```
+
+
+#low Depth
+```{r}
+LD_TPM <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/allTPM_BCCA28Apr2016.csv", stringsAsFactors = FALSE, row.names = 1)
+
+LD_TPM <- LD_TPM[, which(! grepl("^BM", colnames(LD_TPM)))]
+LD_TPM <- LD_TPM[which(! duplicated(LD_TPM$geneSymbol)), ]
+
+rownames(LD_TPM) <- LD_TPM$geneSymbol
+LD_TPM <- LD_TPM[,-1]
+```
+
+NOTE: Must determine why I have 466 samples in the CBFGLIS analysis and 476 here... 
+```{r}
+dim(LD_TPM)
+```
+
+```{r}
+LD_TPM <- as.matrix(LD_TPM)
+head(LD_TPM[,1:5])
+# save(LD_TPM, file = "TARGET_AML_LD_DxOnly_genesAsRowNames.RData")
+```
+
+```{r}
+LD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/combatAdjustedExp.RData"))
+
+dim(LD_counts)
+```
+
+
+
+
+#Read in the genes (covariates) of  interest
+
+#Top 400 highly expressed genes
+```{r}
+#genes selected by Allison Kaeding as beign highly expressed (top 400) 
+highGenesdf <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/Correlation_analysis_w_MSLN.csv", stringsAsFactors = FALSE)
+
+dim(highGenesdf)
+```
+```{r}
+head(highGenesdf)
+```
+
+```{r}
+highGenes <- highGenesdf$X
+```
+
+#CBF MLL associated genes
+```{r}
+CBF_MLL_Genedf <- read.csv("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/Gene_expression_associated_w_being_CBF_and_MLL.csv", stringsAsFactors = FALSE)
+
+dim(CBF_MLL_Genesdf)
+```
+
+these are genes from literature searches. Allison Kaeding April 2017. 
+
+```{r}
+head(CBF_MLL_Genesdf)
+```
+
+```{r}
+t.8.21 <- CBF_MLL_Genesdf$t.8.21.[-1]
+
+inv.16 <- CBF_MLL_Genesdf$inv.16.[-1]
+
+All.CBF <- CBF_MLL_Genesdf$All.CBF[-1]
+
+KMT2A <- CBF_MLL_Genesdf$KMT2A[-1]
+```
+
+```{r}
+genesToExamine <- list(highGenes, t.8.21, inv.16 , All.CBF, KMT2A)
+names(genesToExamine) <- c("highGenes", "t.8.21", "inv.16" , "All.CBF", "KMT2A")
+```
+
+```{r}
+summary(genesToExamine)
+```
+
+```{r}
+names(genesToExamine)
+```
+
+
+```{r}
+#For loop to add MSLN to each list
+for (list in names(genesToExamine)){
+  Newlist <- c(get(list), "MSLN")
+  Newlist <- Newlist[order(Newlist)]
+  # print(Newlist)
+  genesToExamine[[list]] <- Newlist
+}
+```
+
+```{r}
+sapply(genesToExamine, length)
+```
+
+
+##Subset the TPM expression data for each set of genes
+```{r}
+HD_TPM_Expn <- lapply(genesToExamine, subset_ExpnData, matrix=Dx_HDTPM)
+
+length(HD_TPM_Expn)
+```
+
+Not all the gene names are being found?? Must look into this.  
+```{r}
+sapply(HD_TPM_Expn, dim)
+```
+
+```{r}
+LD_TPM_Expn <- lapply(genesToExamine, subset_ExpnData, matrix=LD_TPM)
+
+length(LD_TPM_Expn)
+```
+
+```{r}
+sapply(LD_TPM_Expn, dim)
+```
+
+
+
+#Define the correlation Matrices
+
+Results: many many of these selected genes have very low variance and thus a SD near zero. 
+This affects the correlation calculations for pearsons R. 
+
+I edited the subset function to now have a sd of at least one or greater to avoid the error. 
+
+Instead, I will try to use the WGCNA and Limma linear models to identify the most correlated genes.
+
+```{r}
+HD_corMat <- lapply(HD_TPM_Expn, FUN = cor)
+LD_corMat <- lapply(LD_TPM_Expn, FUN = cor) 
+
+```
+
+```{r}
+summary(HD_corMat)
+```
+
+```{r}
+summary(LD_corMat)
+```
+
+
+#Create Correlation Plots
+```{r}
+# pdf(file="highGenes.pdf", height = 10, width = 10)
+corrplot(HD_corMat$highGenes, method = "color", order = "FPC", tl.cex = 0.1, tl.col = "black", cl.pos="b", cl.cex = 0.75) #N = 160
+# dev.off()
+```
+
+
+```{r fig.height=10, fig.width=10}
+HD_corPlot <- lapply(HD_corMat, function(x) corrplot(x, method = "color", order = "FPC", tl.cex = 0.5, tl.col = "black", cl.pos="b", cl.cex = 0.75) )
+```
+
+
+```{r fig.height=10, fig.width=10}
+LD_corPlot <- lapply(LD_corMat, function(x) corrplot(x, method = "color", order = "FPC", tl.cex = 0.5, tl.col = "black", cl.pos="b", cl.cex = 0.75))
+```
+
+
+
+
